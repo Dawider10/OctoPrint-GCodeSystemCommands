@@ -21,6 +21,11 @@ class GCodeSystemCommands(octoprint.plugin.StartupPlugin,
         self.command_definitions = {}
 
 
+    def on_after_startup(self):
+        helpers = self._plugin_manager.get_helpers("mqtt", "mqtt_publish_with_timestamp")
+        if helpers and "mqtt_publish_with_timestamp" in helpers:
+            self.mqtt_publish_with_timestamp = helpers["mqtt_publish_with_timestamp"]
+
     def on_settings_initialized(self):
         self.reload_command_definitions()
 
@@ -33,8 +38,9 @@ class GCodeSystemCommands(octoprint.plugin.StartupPlugin,
         for definition in command_definitions_tmp:
             cmd_id = definition['id']
             cmd_line = definition['command']
-            self.command_definitions[cmd_id] = cmd_line
-            self._logger.info("Add command definition OCTO%s = %s" % (cmd_id, cmd_line))
+            cmd_mqtt = definition['mqttTopic']
+            self.command_definitions[cmd_id] = [cmd_line, cmd_mqtt]
+            self._logger.info("Add command definition OCTO%s = %s" % (cmd_id, self.command_definitions[cmd_id]))
 
     def hook_gcode_sending(self, comm_instance, phase, cmd, cmd_type, gcode, *args, **kwargs):
         if gcode:
@@ -51,13 +57,13 @@ class GCodeSystemCommands(octoprint.plugin.StartupPlugin,
         cmd_args = match.group(2)
 
         try:
-            cmd_line = self.command_definitions[cmd_id]
+            gcode_command = self.command_definitions[cmd_id]
         except:
             self._logger.error("No definition found for ID %s" % cmd_id)
             comm_instance._log("Return(GCodeSystemCommands): undefined")
             return (None,)
 
-        self._logger.debug("Command ID=%s, Line=%s, Args=%s" % (cmd_id, cmd_line, cmd_args))
+        self._logger.debug("Command ID=%s, Line=%s, Args=%s" % (cmd_id, gcode_command, cmd_args))
 
         self._logger.info("Executing command ID: %s" % cmd_id)
         comm_instance._log("Exec(GCodeSystemCommands): OCTO%s" % cmd_id)
@@ -67,24 +73,37 @@ class GCodeSystemCommands(octoprint.plugin.StartupPlugin,
         cmd_env['OCTOPRINT_GCODESYSTEMCOMMAND_ARGS'] = str(cmd_args) if cmd_args else ''
         cmd_env['OCTOPRINT_GCODESYSTEMCOMMAND_LINE'] = str(cmd)
 
-        try:
-            p = subprocess.Popen(cmd_line, env=cmd_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
-            output = p.communicate()[0]
-            r = p.returncode
-        except:
-            e = sys.exc_info()[0]
-            self._logger.exception("Error executing command ID %s: %s" % (cmd_id, e))
-            return (None,)
+        if gcode_command[0]:
+            try:
+                p = subprocess.Popen(gcode_command, env=cmd_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
+                output = p.communicate()[0]
+                r = p.returncode
+            except:
+                e = sys.exc_info()[0]
+                self._logger.exception("Error executing command ID %s: %s" % (cmd_id, e))
+                return (None,)
 
-        self._logger.debug("Command ID %s returned: %s, output=%s" % (cmd_id, r, output))
-        self._logger.info("Command ID %s returned: %s" % (cmd_id, r))
+            self._logger.debug("Command ID %s returned: %s, output=%s" % (cmd_id, r, output))
+            self._logger.info("Command ID %s returned: %s" % (cmd_id, r))
 
-        if r == 0:
-            status = 'ok'
-        else:
-            status = 'error'
+            if r == 0:
+                status = 'ok'
+            else:
+                status = 'error'
 
-        comm_instance._log("Return(GCodeSystemCommands): %s" % status)
+            comm_instance._log("Return(GCodeSystemCommands): %s" % status)
+
+        if gcode_command[1]:
+            if not self.mqtt_publish_with_timestamp:
+                self._logger.error("MQTT plugin not installed")
+                return None
+            gcode_args = cmd_args.split(' ')
+            payload = {}
+
+            for n in range(len(gcode_args)):
+                payload["arg%s" % (n + 1)] = gcode_args[n]
+
+            self.mqtt_publish_with_timestamp(gcode_command[1], payload, qos=2, allow_queueing=True)
 
         return (None,)
 
@@ -106,7 +125,7 @@ class GCodeSystemCommands(octoprint.plugin.StartupPlugin,
                 data[r] = None
 
         return data
-        
+
     def on_settings_save(self, data):
         octoprint.plugin.SettingsPlugin.on_settings_save(self, data)
         self.reload_command_definitions()

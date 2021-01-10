@@ -7,7 +7,7 @@ $(function() {
         self.command_definitions = ko.observableArray();
 
         self.addCommandDefinition = function() {
-            self.command_definitions.push({id: 0, command:""});
+            self.command_definitions.push({id: 0, command:"", mqttTopic:""});
         };
 
         self.removeCommandDefinition = function(definition) {
